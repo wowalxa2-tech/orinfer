@@ -5,6 +5,7 @@
 pub const EVALUATION_SEED: u64 = 20_261_002;
 
 mod constrained;
+pub(crate) use constrained::verify_for_request;
 mod prepared;
 mod reporting;
 pub(crate) use constrained::RowParameters;
@@ -77,6 +78,10 @@ impl Default for Options {
     }
 }
 impl Options {
+    /// The device history kernel has no prompt/output boundary.
+    pub(crate) fn device_history_compatible(&self) -> bool {
+        self.presence_penalty == 0.0 && self.frequency_penalty == 0.0
+    }
     /// Full categorical law without history processors or probability reports.
     /// Grammar eligibility is checked separately against the request decoder.
     pub fn device_categorical(&self) -> bool {
@@ -127,7 +132,20 @@ fn processed_scores(
     options: &Options,
     mask: Option<&[u32]>,
 ) -> Result<Vec<(u32, f64)>, String> {
+    processed_scores_for_request(logits, history, 0, options, mask)
+}
+
+fn processed_scores_for_request(
+    logits: &[f32],
+    history: &[u32],
+    prompt_len: usize,
+    options: &Options,
+    mask: Option<&[u32]>,
+) -> Result<Vec<(u32, f64)>, String> {
     options.validate()?;
+    if prompt_len > history.len() {
+        return Err("Invalid prompt length for sampling history".into());
+    }
     if logits.is_empty()
         || logits.len() > u32::MAX as usize
         || logits.iter().any(|x| !x.is_finite())
@@ -147,33 +165,28 @@ fn processed_scores(
             .map(|(i, &value)| (i as u32, f64::from(value) + 0.0))
             .collect()
     } else {
-        let mut counts = if options.repetition_penalty != 1.0
+        let use_history = options.repetition_penalty != 1.0
             || options.presence_penalty != 0.0
-            || options.frequency_penalty != 0.0
-        {
-            vec![0usize; logits.len()]
+            || options.frequency_penalty != 0.0;
+        let (seen, counts) = if use_history {
+            penalty_history(history, prompt_len, logits.len())?
         } else {
-            vec![]
+            (vec![], vec![])
         };
-        if !counts.is_empty() {
-            for &id in history {
-                if let Some(n) = counts.get_mut(id as usize) {
-                    *n += 1;
-                }
-            }
-        }
         let scores: Vec<(u32, f64)> = logits
             .iter()
             .enumerate()
             .map(|(i, &value)| {
                 let mut score = f64::from(value);
                 let count = counts.get(i).copied().unwrap_or(0);
-                if count > 0 {
+                if seen.get(i).copied().unwrap_or(false) {
                     score = if score < 0.0 {
                         score * options.repetition_penalty
                     } else {
                         score / options.repetition_penalty
                     };
+                }
+                if count > 0 {
                     score -= options.presence_penalty;
                 }
                 score -= options.frequency_penalty * count as f64;
@@ -222,6 +235,14 @@ impl Distribution {
     pub fn from_logits(logits: &[f32], history: &[u32], options: &Options) -> Result<Self, String> {
         Self::from_masked(logits, history, options, None)
     }
+    pub(crate) fn from_logits_for_request(
+        logits: &[f32],
+        history: &[u32],
+        prompt_len: usize,
+        options: &Options,
+    ) -> Result<Self, String> {
+        Self::from_masked_for_request(logits, history, prompt_len, options, None)
+    }
     pub fn from_masked(
         logits: &[f32],
         history: &[u32],
@@ -229,6 +250,16 @@ impl Distribution {
         mask: Option<&[u32]>,
     ) -> Result<Self, String> {
         let scores = processed_scores(logits, history, options, mask)?;
+        Ok(Self::from_scores(logits.len(), scores, options))
+    }
+    pub(crate) fn from_masked_for_request(
+        logits: &[f32],
+        history: &[u32],
+        prompt_len: usize,
+        options: &Options,
+        mask: Option<&[u32]>,
+    ) -> Result<Self, String> {
+        let scores = processed_scores_for_request(logits, history, prompt_len, options, mask)?;
         Ok(Self::from_scores(logits.len(), scores, options))
     }
     // Only called after processing/validation; the score vector may have been
@@ -375,47 +406,84 @@ impl Distribution {
     }
 }
 
+// Repetition sees the complete history. Presence/frequency see generated tokens.
+fn penalty_history(
+    history: &[u32],
+    prompt_len: usize,
+    vocab: usize,
+) -> Result<(Vec<bool>, Vec<usize>), String> {
+    let output = history
+        .get(prompt_len..)
+        .ok_or("Invalid prompt length for sampling history")?;
+    let mut seen = vec![false; vocab];
+    let mut counts = vec![0usize; vocab];
+    for &id in history {
+        if let Some(value) = seen.get_mut(id as usize) {
+            *value = true;
+        }
+    }
+    for &id in output {
+        if let Some(value) = counts.get_mut(id as usize) {
+            *value += 1;
+        }
+    }
+    Ok((seen, counts))
+}
+
 pub fn sample(
     logits: &[f32],
     history: &[u32],
     options: &Options,
     step: usize,
 ) -> Result<u32, String> {
+    sample_for_request(logits, history, 0, options, step)
+}
+
+pub(crate) fn sample_for_request(
+    logits: &[f32],
+    history: &[u32],
+    prompt_len: usize,
+    options: &Options,
+    step: usize,
+) -> Result<u32, String> {
     if options.temperature == 0.0 {
-        return greedy(logits, history, options);
+        return greedy_for_request(logits, history, prompt_len, options);
     }
-    Distribution::from_logits(logits, history, options)?.draw(counter_uniform(
-        options.seed,
-        0,
-        step as u64,
-    ))
+    Distribution::from_logits_for_request(logits, history, prompt_len, options)?
+        .draw(counter_uniform(options.seed, 0, step as u64))
 }
 
 /// Greedy needs neither sorting nor a dense probability distribution. Retain
 /// f64 processors, full-vocabulary validation and total-order tie semantics.
+#[cfg(test)]
 fn greedy(logits: &[f32], history: &[u32], options: &Options) -> Result<u32, String> {
+    greedy_for_request(logits, history, 0, options)
+}
+fn greedy_for_request(
+    logits: &[f32],
+    history: &[u32],
+    prompt_len: usize,
+    options: &Options,
+) -> Result<u32, String> {
     options.validate()?;
     if logits.is_empty() || logits.len() > u32::MAX as usize {
         return Err("Invalid sampling logits".into());
     }
-    let mut counts = vec![0usize; logits.len()];
-    for &id in history {
-        if let Some(count) = counts.get_mut(id as usize) {
-            *count += 1;
-        }
-    }
+    let (seen, counts) = penalty_history(history, prompt_len, logits.len())?;
     let mut best = (0, f64::NEG_INFINITY);
     for (id, (&value, &count)) in logits.iter().zip(&counts).enumerate() {
         if !value.is_finite() {
             return Err("Invalid sampling logits".into());
         }
         let mut score = f64::from(value);
-        if count > 0 {
+        if seen[id] {
             score = if score < 0.0 {
                 score * options.repetition_penalty
             } else {
                 score / options.repetition_penalty
             };
+        }
+        if count > 0 {
             score -= options.presence_penalty;
         }
         score -= options.frequency_penalty * count as f64;
@@ -549,14 +617,76 @@ mod sampling_tests {
                     };
                     for logits in [vec![0.0, -0.0, 1.0, -2.0], vec![-0.0, 0.0], vec![1.0; 7]] {
                         let history = [0, 0, 2, 6, 100];
-                        let reference = Distribution::from_logits(&logits, &history, &options)
+                        for prompt_len in [0, 2, history.len()] {
+                            let reference = Distribution::from_logits_for_request(
+                                &logits, &history, prompt_len, &options,
+                            )
                             .and_then(|d| d.draw(0.5));
-                        assert_eq!(greedy(&logits, &history, &options), reference);
+                            assert_eq!(
+                                greedy_for_request(&logits, &history, prompt_len, &options),
+                                reference
+                            );
+                        }
                     }
                 }
             }
         }
         assert!(greedy(&[1., f32::NAN], &[], &Options::default()).is_err());
+    }
+    #[test]
+    fn request_penalties_separate_prompt_from_generated_output() {
+        let options = Options {
+            repetition_penalty: 2.0,
+            presence_penalty: 1.0,
+            frequency_penalty: 0.5,
+            ..Options::default()
+        };
+        let history = [0, 0, 1, 1];
+        let scores =
+            processed_scores_for_request(&[2., 2., 2.], &history, 2, &options, None).unwrap();
+        assert_eq!(scores, vec![(0, 1.0), (1, -1.0), (2, 2.0)]);
+        assert!(processed_scores_for_request(&[2.], &history, 5, &options, None).is_err());
+
+        let options = Options {
+            temperature: 0.0,
+            presence_penalty: 1.5,
+            top_logprobs: Some(2),
+            ..Options::default()
+        };
+        assert_eq!(
+            sample_for_request(&[3., 2.5], &[0], 1, &options, 0).unwrap(),
+            0
+        );
+        assert_eq!(
+            sample_for_request(&[3., 2.5], &[0, 0], 1, &options, 1).unwrap(),
+            1
+        );
+        let mut decoder = Decoder::default();
+        let law = decoder
+            .law_for_request(&[3., 2.5], &[0], 1, &options)
+            .unwrap();
+        assert_eq!(law.distribution.draw(0.0).unwrap(), 0);
+        decoder.commit(0, law).unwrap();
+        let report = decoder.take_records();
+        assert_eq!(report[0].top[0].0, 0);
+        let mut decoder = Decoder::default();
+        assert_eq!(
+            verify_for_request(&[], &[3., 2.5], &[0], 1, &options, &mut decoder, 0, 2).unwrap(),
+            vec![0]
+        );
+        assert_eq!(
+            crate::mtp::sampled_commit_for_request(&[], &[3., 2.5], &[0], 1, &options, 0, 2)
+                .unwrap(),
+            vec![0]
+        );
+        assert!(!options.device_history_compatible());
+        assert!(
+            Options {
+                repetition_penalty: 2.0,
+                ..Options::default()
+            }
+            .device_history_compatible()
+        );
     }
     #[test]
     fn rounded_mass_does_not_select_an_underflowed_token() {

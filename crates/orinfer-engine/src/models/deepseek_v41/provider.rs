@@ -210,9 +210,12 @@ impl Request {
     }
     fn accept_output(&mut self, output: &Output) -> Result<u32> {
         let token = if self.host_sampling() && !(self.device_sample() && output.logits.is_empty()) {
-            let law = self
-                .decoder
-                .law(&output.logits, &self.history, &self.sampling)?;
+            let law = self.decoder.law_for_request(
+                &output.logits,
+                &self.history,
+                self.input.len(),
+                &self.sampling,
+            )?;
             let token = law.distribution.draw(crate::sampling::counter_uniform(
                 self.sampling.seed,
                 0,

@@ -16,7 +16,10 @@ impl ModelRuntime {
         };
         // Probability reporting and speculative p/q laws retain their current
         // reference path. The batched wrapper uses exactly these same inputs.
-        if options.temperature == 0.0 || options.top_logprobs.is_some() {
+        if options.temperature == 0.0
+            || options.top_logprobs.is_some()
+            || !options.device_history_compatible()
+        {
             return Ok(None);
         }
         for (name, bytes) in inputs(

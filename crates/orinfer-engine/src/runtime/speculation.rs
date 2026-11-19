@@ -223,9 +223,10 @@ impl ModelRuntime {
                     let raw = self
                         .execution
                         .download_bytes(&spec.draft_logits, vocab * 4)?;
-                    let distribution = crate::sampling::Distribution::from_logits(
+                    let distribution = crate::sampling::Distribution::from_logits_for_request(
                         &floats(&raw, crate::artifact::Dtype::F32),
                         &draft_history,
+                        input.len(),
                         options,
                     )?;
                     let token = distribution.draw(crate::sampling::counter_uniform(
@@ -271,10 +272,11 @@ impl ModelRuntime {
                 let raw = self
                     .execution
                     .download_bytes(&spec.verification_logits, plan.tokens * vocab * 4)?;
-                crate::mtp::sampled_commit(
+                crate::mtp::sampled_commit_for_request(
                     &proposals,
                     &floats(&raw, crate::artifact::Dtype::F32),
                     &history,
+                    input.len(),
                     options,
                     generated,
                     vocab,

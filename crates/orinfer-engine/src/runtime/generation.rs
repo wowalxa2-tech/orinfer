@@ -84,6 +84,7 @@ impl ModelRuntime {
             && options.temperature == 0.0
             && !options.is_greedy()
             && options.logit_bias.is_empty()
+            && options.device_history_compatible()
         {
             options.validate()?;
             // Counts are rebuilt from the authoritative history, including the
@@ -123,7 +124,17 @@ impl ModelRuntime {
                 .find(|b| b.name == m.logits)
                 .ok_or("Missing logits")?;
             let raw = self.execution.download_bytes(&m.logits, spec.bytes()?)?;
-            crate::sampling::sample(&floats(&raw, spec.dtype), history, options, step)
+            let prompt_len = history
+                .len()
+                .checked_sub(step)
+                .ok_or("Generated tokens exceed sampling history")?;
+            crate::sampling::sample_for_request(
+                &floats(&raw, spec.dtype),
+                history,
+                prompt_len,
+                options,
+                step,
+            )
         }
     }
 }

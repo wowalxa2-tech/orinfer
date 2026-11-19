@@ -33,6 +33,7 @@ impl ModelRuntime {
                 !req.prefilling
                     && req.sampling.temperature > 0.
                     && req.sampling.top_logprobs.is_none()
+                    && req.sampling.device_history_compatible()
             })
             .take(2)
             .count();
@@ -45,6 +46,7 @@ impl ModelRuntime {
             if req.prefilling
                 || req.sampling.temperature == 0.
                 || req.sampling.top_logprobs.is_some()
+                || !req.sampling.device_history_compatible()
             {
                 continue;
             }
