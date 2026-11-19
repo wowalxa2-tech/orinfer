@@ -2452,6 +2452,7 @@ impl ModelRuntime {
         if self.manifest.sampling.is_some()
             && req.sampling.temperature > 0.
             && req.sampling.top_logprobs.is_none()
+            && req.sampling.device_history_compatible()
         {
             let mask = req.decoder.gpu_mask()?;
             if mask.as_ref().is_some_and(|words| {
@@ -2489,9 +2490,12 @@ impl ModelRuntime {
         let raw = self
             .execution
             .download_bytes(&self.manifest.logits, spec.bytes()?)?;
-        let law = req
-            .decoder
-            .law(&floats(&raw, spec.dtype), &req.history, &req.sampling)?;
+        let law = req.decoder.law_for_request(
+            &floats(&raw, spec.dtype),
+            &req.history,
+            req.input.len(),
+            &req.sampling,
+        )?;
         let token = law.distribution.draw(crate::sampling::counter_uniform(
             req.sampling.seed,
             0,

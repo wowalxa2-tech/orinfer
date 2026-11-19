@@ -128,6 +128,15 @@ impl Decoder {
         result
     }
     pub fn law(&mut self, logits: &[f32], history: &[u32], options: &Options) -> Result<Law> {
+        self.law_for_request(logits, history, 0, options)
+    }
+    pub(crate) fn law_for_request(
+        &mut self,
+        logits: &[f32],
+        history: &[u32],
+        prompt_len: usize,
+        options: &Options,
+    ) -> Result<Law> {
         let mask = match self.constraint.as_mut().map(|c| c.mask()).transpose() {
             Ok(mask) => mask,
             Err(error) => {
@@ -135,7 +144,13 @@ impl Decoder {
                 return Err(error);
             }
         };
-        let scores = super::processed_scores(logits, history, options, mask.as_deref());
+        let scores = super::processed_scores_for_request(
+            logits,
+            history,
+            prompt_len,
+            options,
+            mask.as_deref(),
+        );
         if let Err(error) = &scores
             && error == "Grammar permits no tokens"
         {
@@ -268,13 +283,32 @@ pub fn verify(
     step: usize,
     vocab: usize,
 ) -> Result<Vec<u32>> {
+    verify_for_request(proposals, logits, history, 0, options, decoder, step, vocab)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn verify_for_request(
+    proposals: &[crate::mtp::Proposal],
+    logits: &[f32],
+    history: &[u32],
+    prompt_len: usize,
+    options: &Options,
+    decoder: &mut Decoder,
+    step: usize,
+    vocab: usize,
+) -> Result<Vec<u32>> {
     if vocab == 0 || logits.len() < (proposals.len() + 1) * vocab {
         return Err("Invalid constrained verification logits".into());
     }
     let mut history = history.to_vec();
     let mut committed = vec![];
     for i in 0..=proposals.len() {
-        let law = decoder.law(&logits[i * vocab..(i + 1) * vocab], &history, options)?;
+        let law = decoder.law_for_request(
+            &logits[i * vocab..(i + 1) * vocab],
+            &history,
+            prompt_len,
+            options,
+        )?;
         let (token, rejected) = if let Some(q) = proposals.get(i) {
             let qx = q.distribution.probability(q.token);
             if qx <= 0.0 {

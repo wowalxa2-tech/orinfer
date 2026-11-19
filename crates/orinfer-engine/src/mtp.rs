@@ -53,15 +53,29 @@ pub fn sampled_commit(
     step: usize,
     vocab: usize,
 ) -> Result<Vec<u32>> {
+    sampled_commit_for_request(drafts, target_logits, history, 0, options, step, vocab)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn sampled_commit_for_request(
+    drafts: &[Proposal],
+    target_logits: &[f32],
+    history: &[u32],
+    prompt_len: usize,
+    options: &crate::sampling::Options,
+    step: usize,
+    vocab: usize,
+) -> Result<Vec<u32>> {
     if vocab == 0 || target_logits.len() != (drafts.len() + 1) * vocab {
         return Err("Invalid MTP verification logits extent".into());
     }
     let mut history = history.to_vec();
     let mut committed = Vec::with_capacity(drafts.len() + 1);
     for (i, draft) in drafts.iter().enumerate() {
-        let p = crate::sampling::Distribution::from_logits(
+        let p = crate::sampling::Distribution::from_logits_for_request(
             &target_logits[i * vocab..(i + 1) * vocab],
             &history,
+            prompt_len,
             options,
         )?;
         let qx = draft.distribution.probability(draft.token);
@@ -83,9 +97,10 @@ pub fn sampled_commit(
             return Ok(committed);
         }
     }
-    let p = crate::sampling::Distribution::from_logits(
+    let p = crate::sampling::Distribution::from_logits_for_request(
         &target_logits[drafts.len() * vocab..],
         &history,
+        prompt_len,
         options,
     )?;
     committed.push(p.draw(crate::sampling::counter_uniform(

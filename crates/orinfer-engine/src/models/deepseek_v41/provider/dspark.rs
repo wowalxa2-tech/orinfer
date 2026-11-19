@@ -520,10 +520,11 @@ impl Runtime {
                     .iter()
                     .flat_map(|v| v.logits.iter().copied())
                     .collect::<Vec<_>>();
-                crate::sampling::verify(
+                crate::sampling::verify_for_request(
                     &proposals,
                     &logits,
                     &request.history,
+                    request.input.len(),
                     &request.sampling,
                     &mut request.decoder,
                     request.generated,

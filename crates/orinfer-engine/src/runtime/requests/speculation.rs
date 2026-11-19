@@ -745,6 +745,7 @@ impl ModelRuntime {
                 req.sampling.temperature <= 0.
                     || req.sampling.top_logprobs.is_some()
                     || req.decoder.has_constraint()
+                    || !req.sampling.device_history_compatible()
             })
         {
             return None;
@@ -1464,9 +1465,10 @@ impl ModelRuntime {
                         .execution
                         .download_bytes(&spec.draft_logits, vocab * 4)?;
                     draft_decoder
-                        .law(
+                        .law_for_request(
                             &floats(&raw, crate::artifact::Dtype::F32),
                             draft_history,
+                            req.input.len(),
                             &draft_options,
                         )
                         .inspect_err(|error| {
@@ -1492,9 +1494,10 @@ impl ModelRuntime {
                 .execution
                 .download_bytes(&spec.draft_logits, vocab * 4)?;
             let law = draft_decoder
-                .law(
+                .law_for_request(
                     &floats(&raw, crate::artifact::Dtype::F32),
                     draft_history,
+                    req.input.len(),
                     &draft_options,
                 )
                 .inspect_err(|error| {
@@ -1668,9 +1671,10 @@ impl ModelRuntime {
                             logits = Some(floats(&raw, crate::artifact::Dtype::F32));
                         }
                         req.decoder
-                            .law(
+                            .law_for_request(
                                 &logits.as_ref().unwrap()[row * vocab..(row + 1) * vocab],
                                 &history,
+                                req.input.len(),
                                 &req.sampling,
                             )?
                             .distribution
@@ -1690,10 +1694,11 @@ impl ModelRuntime {
             let raw = self
                 .execution
                 .download_bytes(&spec.verification_logits, plan.tokens * vocab * 4)?;
-            crate::sampling::verify(
+            crate::sampling::verify_for_request(
                 &proposals,
                 &floats(&raw, crate::artifact::Dtype::F32),
                 &req.history,
+                req.input.len(),
                 &req.sampling,
                 &mut req.decoder,
                 req.generated,
